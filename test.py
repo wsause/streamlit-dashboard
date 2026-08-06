@@ -53,7 +53,6 @@ def load_data():
         abilities_df,
         skills_df,
         activities_df,
-        tasks_df,
         openai_df
     )
 
@@ -64,7 +63,6 @@ def load_data():
     abilities_df,
     skills_df,
     activities_df,
-    tasks_df,
     openai_df
 
 ) = load_data()
