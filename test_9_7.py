@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import numpy as np
 
 
@@ -145,26 +144,16 @@ cip_df["Occupation Code"] = (
 )
 
 
+
 # ---------------------------------------------------
 # Sidebar - Major Selection
 # ---------------------------------------------------
-#
-# NOTE: the selectbox now has key="major_select". This lets the
-# network graph below programmatically change the selected major
-# (by writing to st.session_state.major_select and calling
-# st.rerun()) when the user clicks a related-major node.
 
 st.subheader("Select a Major")
 
-all_major_titles = sorted(cip_df["2020 CIP Title"].unique())
-
-if "major_select" not in st.session_state:
-    st.session_state.major_select = all_major_titles[0]
-
 selected_cip = st.selectbox(
     "Select Major",
-    all_major_titles,
-    key="major_select"
+    sorted(cip_df["2020 CIP Title"].unique())
 )
 
 # Reset selected occupation when the major changes
@@ -215,255 +204,57 @@ career_df = career_df.dropna(
 )
 
 
+# ---------------------------------------------------
+# Major → Career Sankey Diagram
+# ---------------------------------------------------
 
+import plotly.graph_objects as go
 
-
-
-# ---------------------------------------------------------
-# Major -> Occupations fan chart (top occupations by employment,
-# colored by AI exposure, sized by employment)
-# ---------------------------------------------------------
-#
-# One node for the selected major on the left. Curved lines fan out
-# to its top occupations by employment on the right. Each occupation
-# dot is colored by AI-exposure risk tier and sized by how many
-# people currently work in it. Clicking a dot selects that
-# occupation, which populates the detailed profile section further
-# down the page (same session_state.selected_occupation used by the
-# career-landscape bubble chart below).
-
-MAX_FAN_OCCUPATIONS = 10
-
-# Pull AI exposure onto the major's occupation/BLS data. career_df
-# was already built above as occupation_df merged with bls_df; here
-# we additionally bring in dv_rating_beta from openai_df, joined the
-# same way the existing "Selected Occupation Information" section
-# does it below (O*NET Code == O*NET-SOC Code).
-major_profile_df = career_df.merge(
-    openai_df[["O*NET-SOC Code", "dv_rating_beta"]],
-    left_on="O*NET Code",
-    right_on="O*NET-SOC Code",
-    how="left"
+sankey_occupations = (
+    career_df["O*NET-SOC 2019 Title"]
+    .dropna()
+    .drop_duplicates()
+    .tolist()
 )
 
-st.header("Career Options")
+sankey_labels = [selected_cip] + sankey_occupations
 
-if major_profile_df.empty:
+sankey_source = [0] * len(sankey_occupations)
 
-    st.info(
-        f"No occupation data found for {selected_cip}."
-    )
+sankey_target = list(
+    range(1, len(sankey_occupations) + 1)
+)
 
-else:
+sankey_value = [1] * len(sankey_occupations)
 
-    def _exposure_tier(beta):
-        if pd.isna(beta):
-            return "Unknown", "#B0B0B0"
-        if beta < 0.35:
-            return "Low", "#2CA02C"
-        if beta < 0.60:
-            return "Moderate", "#F2C744"
-        if beta < 0.80:
-            return "High", "#E67E22"
-        return "Very High", "#B22222"
-
-    fan_df = (
-        major_profile_df
-        .dropna(subset=["Employment 2024"])
-        .sort_values("Employment 2024", ascending=False)
-        .head(MAX_FAN_OCCUPATIONS)
-        .reset_index(drop=True)
-    )
-
-    n_occ = len(fan_df)
-
-    avg_beta = major_profile_df["dv_rating_beta"].mean()
-    median_wage_major = major_profile_df["Median Annual Wage 2024"].median()
-
-    subtitle_bits = []
-    if pd.notna(avg_beta):
-        subtitle_bits.append(f"avg AI exposure {avg_beta:.0%}")
-    if pd.notna(median_wage_major):
-        subtitle_bits.append(f"median wage ${median_wage_major:,.0f}")
-    subtitle = " · ".join(subtitle_bits)
-
-    if n_occ < MAX_FAN_OCCUPATIONS:
-        st.caption(
-            f"Showing all {n_occ} occupations with employment data for "
-            f"{selected_cip}."
-        )
-    else:
-        st.caption(
-            f"Showing the top {MAX_FAN_OCCUPATIONS} occupations for "
-            f"{selected_cip} by 2024 employment."
-        )
-
-    # -----------------------------------------------------
-    # Positions: major at (0, 0); occupations at x = 3, evenly
-    # spaced vertically, largest employment on top.
-    # -----------------------------------------------------
-
-    occ_x = 3
-    occ_y = [
-        (n_occ - 1) / 2 - i
-        for i in range(n_occ)
-    ]
-
-    max_employment = fan_df["Employment 2024"].max()
-    min_size, max_size = 14, 46
-
-    def _node_size(employment):
-        if max_employment <= 0:
-            return min_size
-        return min_size + (max_size - min_size) * np.sqrt(
-            employment / max_employment
-        )
-
-    fan_fig = go.Figure()
-
-    # ---- Curved fan lines (one trace per occupation) ----
-
-    for i in range(n_occ):
-        y1 = occ_y[i]
-        _, color = _exposure_tier(fan_df.loc[i, "dv_rating_beta"])
-        mid_x = occ_x / 2
-        fan_fig.add_trace(
-            go.Scatter(
-                x=[0, mid_x, mid_x, occ_x],
-                y=[0, 0, y1, y1],
-                mode="lines",
-                line=dict(shape="spline", width=1.5, color=color),
-                opacity=0.35,
-                hoverinfo="none",
-                showlegend=False,
-            )
-        )
-
-    # ---- Major node ----
-
-    fan_fig.add_trace(
-        go.Scatter(
-            x=[0],
-            y=[0],
-            mode="markers+text",
-            marker=dict(size=34, color="#333333"),
-            text=[selected_cip],
-            textposition="middle left",
-            textfont=dict(size=13, color="#222222"),
-            hovertext=[f"{selected_cip}<br>{subtitle}"],
-            hoverinfo="text",
-            showlegend=False,
-        )
-    )
-
-    # ---- Occupation nodes ----
-
-    occ_colors = [
-        _exposure_tier(fan_df.loc[i, "dv_rating_beta"])[1]
-        for i in range(n_occ)
-    ]
-    occ_sizes = [
-        _node_size(fan_df.loc[i, "Employment 2024"])
-        for i in range(n_occ)
-    ]
-
-    occ_labels = []
-    occ_hover = []
-    for i in range(n_occ):
-        row = fan_df.loc[i]
-        beta = row["dv_rating_beta"]
-        tier, _ = _exposure_tier(beta)
-        beta_text = f" ({beta:.0%})" if pd.notna(beta) else ""
-        occ_labels.append(f"{row['O*NET-SOC 2019 Title']}{beta_text}")
-
-        wage = row["Median Annual Wage 2024"]
-        wage_text = f"${wage:,.0f}" if pd.notna(wage) else "N/A"
-
-        growth_text = "N/A"
-        if pd.notna(row.get("Employment 2034")) and row["Employment 2024"]:
-            growth_pct = (
-                (row["Employment 2034"] - row["Employment 2024"])
-                / row["Employment 2024"] * 100
-            )
-            growth_text = f"{growth_pct:+.1f}% by 2034"
-
-        occ_hover.append(
-            f"<b>{row['O*NET-SOC 2019 Title']}</b><br>"
-            f"AI exposure: {tier}"
-            + (f" ({beta:.0%})" if pd.notna(beta) else "")
-            + f"<br>Employment 2024: {row['Employment 2024']:,.0f}"
-            + f"<br>Median wage: {wage_text}"
-            + f"<br>Projected growth: {growth_text}"
-            + "<br><i>Click to see full profile</i>"
-        )
-
-    fan_fig.add_trace(
-        go.Scatter(
-            x=[occ_x] * n_occ,
-            y=occ_y,
-            mode="markers+text",
-            marker=dict(size=occ_sizes, color=occ_colors, line=dict(width=1, color="white")),
-            text=occ_labels,
-            textposition="middle right",
-            textfont=dict(size=12, color="#222222"),
-            hovertext=occ_hover,
-            hoverinfo="text",
-            customdata=fan_df["O*NET-SOC 2019 Title"],
-            showlegend=False,
-        )
-    )
-
-    # ---- Legend (dummy traces, one per exposure tier) ----
-
-    for tier_name, tier_color in [
-        ("Low", "#2CA02C"),
-        ("Moderate", "#F2C744"),
-        ("High", "#E67E22"),
-        ("Very High", "#B22222"),
-    ]:
-        fan_fig.add_trace(
-            go.Scatter(
-                x=[None], y=[None],
-                mode="markers",
-                marker=dict(size=10, color=tier_color),
-                name=tier_name,
-                showlegend=True,
-            )
-        )
-
-    fan_fig.update_layout(
-        title=f"{selected_cip} → top occupations by employment",
-        height=max(500, 55 * n_occ),
-        margin=dict(l=10, r=160, t=60, b=10),
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0,
-            title="AI exposure  ·  dot size = employment",
+sankey_fig = go.Figure(
+    go.Sankey(
+        node=dict(
+            label=sankey_labels,
+            pad=20,
+            thickness=20
         ),
-        xaxis=dict(visible=False, range=[-2.2, occ_x + 2]),
-        yaxis=dict(visible=False),
-        plot_bgcolor="white",
+        link=dict(
+            source=sankey_source,
+            target=sankey_target,
+            value=sankey_value
+        )
     )
+)
 
-    fan_event = st.plotly_chart(
-        fan_fig,
-        use_container_width=True,
-        key="major_fan_chart",
-        on_select="rerun",
-        selection_mode="points",
-    )
+sankey_fig.update_layout(
+    title="Major → Related Careers",
+    height=500,
+    font=dict(size=12)
+)
 
-    if fan_event.selection.points:
-        clicked_point = fan_event.selection.points[0]
-        clicked_occ = clicked_point.get("customdata")
-        if clicked_occ:
-            st.session_state.selected_occupation = clicked_occ
-            st.rerun()
+st.plotly_chart(
+    sankey_fig,
+    use_container_width=True
+)
 
+
+# ---------------------------------------------------
 # Career Comparison Charts
 # ---------------------------------------------------
 

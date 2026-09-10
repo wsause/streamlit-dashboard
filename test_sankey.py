@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import numpy as np
 
 
@@ -145,26 +144,16 @@ cip_df["Occupation Code"] = (
 )
 
 
+
 # ---------------------------------------------------
 # Sidebar - Major Selection
 # ---------------------------------------------------
-#
-# NOTE: the selectbox now has key="major_select". This lets the
-# network graph below programmatically change the selected major
-# (by writing to st.session_state.major_select and calling
-# st.rerun()) when the user clicks a related-major node.
 
 st.subheader("Select a Major")
 
-all_major_titles = sorted(cip_df["2020 CIP Title"].unique())
-
-if "major_select" not in st.session_state:
-    st.session_state.major_select = all_major_titles[0]
-
 selected_cip = st.selectbox(
     "Select Major",
-    all_major_titles,
-    key="major_select"
+    sorted(cip_df["2020 CIP Title"].unique())
 )
 
 # Reset selected occupation when the major changes
@@ -215,255 +204,153 @@ career_df = career_df.dropna(
 )
 
 
-
-
-
-
 # ---------------------------------------------------------
-# Major -> Occupations fan chart (top occupations by employment,
-# colored by AI exposure, sized by employment)
+# Sankey Diagram: Majors → Occupations
 # ---------------------------------------------------------
-#
-# One node for the selected major on the left. Curved lines fan out
-# to its top occupations by employment on the right. Each occupation
-# dot is colored by AI-exposure risk tier and sized by how many
-# people currently work in it. Clicking a dot selects that
-# occupation, which populates the detailed profile section further
-# down the page (same session_state.selected_occupation used by the
-# career-landscape bubble chart below).
+import plotly.graph_objects as go
 
-MAX_FAN_OCCUPATIONS = 10
-
-# Pull AI exposure onto the major's occupation/BLS data. career_df
-# was already built above as occupation_df merged with bls_df; here
-# we additionally bring in dv_rating_beta from openai_df, joined the
-# same way the existing "Selected Occupation Information" section
-# does it below (O*NET Code == O*NET-SOC Code).
-major_profile_df = career_df.merge(
-    openai_df[["O*NET-SOC Code", "dv_rating_beta"]],
-    left_on="O*NET Code",
-    right_on="O*NET-SOC Code",
-    how="left"
+# Get occupations associated with the selected major
+selected_occupation_df = (
+    cip_df[
+        cip_df["2020 CIP Title"] == selected_cip
+    ]
+    [["2020 CIP Title", "O*NET-SOC 2019 Title"]]
+    .drop_duplicates()
 )
 
-st.header("Career Options")
+selected_occupations = (
+    selected_occupation_df["O*NET-SOC 2019 Title"]
+    .tolist()
+)
 
-if major_profile_df.empty:
 
-    st.info(
-        f"No occupation data found for {selected_cip}."
-    )
-
-else:
-
-    def _exposure_tier(beta):
-        if pd.isna(beta):
-            return "Unknown", "#B0B0B0"
-        if beta < 0.35:
-            return "Low", "#2CA02C"
-        if beta < 0.60:
-            return "Moderate", "#F2C744"
-        if beta < 0.80:
-            return "High", "#E67E22"
-        return "Very High", "#B22222"
-
-    fan_df = (
-        major_profile_df
-        .dropna(subset=["Employment 2024"])
-        .sort_values("Employment 2024", ascending=False)
-        .head(MAX_FAN_OCCUPATIONS)
-        .reset_index(drop=True)
-    )
-
-    n_occ = len(fan_df)
-
-    avg_beta = major_profile_df["dv_rating_beta"].mean()
-    median_wage_major = major_profile_df["Median Annual Wage 2024"].median()
-
-    subtitle_bits = []
-    if pd.notna(avg_beta):
-        subtitle_bits.append(f"avg AI exposure {avg_beta:.0%}")
-    if pd.notna(median_wage_major):
-        subtitle_bits.append(f"median wage ${median_wage_major:,.0f}")
-    subtitle = " · ".join(subtitle_bits)
-
-    if n_occ < MAX_FAN_OCCUPATIONS:
-        st.caption(
-            f"Showing all {n_occ} occupations with employment data for "
-            f"{selected_cip}."
-        )
-    else:
-        st.caption(
-            f"Showing the top {MAX_FAN_OCCUPATIONS} occupations for "
-            f"{selected_cip} by 2024 employment."
-        )
-
-    # -----------------------------------------------------
-    # Positions: major at (0, 0); occupations at x = 3, evenly
-    # spaced vertically, largest employment on top.
-    # -----------------------------------------------------
-
-    occ_x = 3
-    occ_y = [
-        (n_occ - 1) / 2 - i
-        for i in range(n_occ)
+# Find other majors that share those occupations
+related_majors = (
+    cip_df[
+        cip_df["O*NET-SOC 2019 Title"].isin(selected_occupations)
+        & (cip_df["2020 CIP Title"] != selected_cip)
     ]
+    ["2020 CIP Title"]
+    .drop_duplicates()
+    .sort_values()
+    .tolist()
+)
 
-    max_employment = fan_df["Employment 2024"].max()
-    min_size, max_size = 14, 46
 
-    def _node_size(employment):
-        if max_employment <= 0:
-            return min_size
-        return min_size + (max_size - min_size) * np.sqrt(
-            employment / max_employment
-        )
+# Put the selected major first, followed by related majors
+all_majors = [selected_cip] + related_majors
 
-    fan_fig = go.Figure()
 
-    # ---- Curved fan lines (one trace per occupation) ----
-
-    for i in range(n_occ):
-        y1 = occ_y[i]
-        _, color = _exposure_tier(fan_df.loc[i, "dv_rating_beta"])
-        mid_x = occ_x / 2
-        fan_fig.add_trace(
-            go.Scatter(
-                x=[0, mid_x, mid_x, occ_x],
-                y=[0, 0, y1, y1],
-                mode="lines",
-                line=dict(shape="spline", width=1.5, color=color),
-                opacity=0.35,
-                hoverinfo="none",
-                showlegend=False,
-            )
-        )
-
-    # ---- Major node ----
-
-    fan_fig.add_trace(
-        go.Scatter(
-            x=[0],
-            y=[0],
-            mode="markers+text",
-            marker=dict(size=34, color="#333333"),
-            text=[selected_cip],
-            textposition="middle left",
-            textfont=dict(size=13, color="#222222"),
-            hovertext=[f"{selected_cip}<br>{subtitle}"],
-            hoverinfo="text",
-            showlegend=False,
-        )
-    )
-
-    # ---- Occupation nodes ----
-
-    occ_colors = [
-        _exposure_tier(fan_df.loc[i, "dv_rating_beta"])[1]
-        for i in range(n_occ)
+# Get all major → occupation relationships
+sankey_df = (
+    cip_df[
+        cip_df["2020 CIP Title"].isin(all_majors)
     ]
-    occ_sizes = [
-        _node_size(fan_df.loc[i, "Employment 2024"])
-        for i in range(n_occ)
-    ]
+    [["2020 CIP Title", "O*NET-SOC 2019 Title"]]
+    .drop_duplicates()
+)
 
-    occ_labels = []
-    occ_hover = []
-    for i in range(n_occ):
-        row = fan_df.loc[i]
-        beta = row["dv_rating_beta"]
-        tier, _ = _exposure_tier(beta)
-        beta_text = f" ({beta:.0%})" if pd.notna(beta) else ""
-        occ_labels.append(f"{row['O*NET-SOC 2019 Title']}{beta_text}")
 
-        wage = row["Median Annual Wage 2024"]
-        wage_text = f"${wage:,.0f}" if pd.notna(wage) else "N/A"
+# ---------------------------------------------------------
+# Create unique nodes
+# ---------------------------------------------------------
 
-        growth_text = "N/A"
-        if pd.notna(row.get("Employment 2034")) and row["Employment 2024"]:
-            growth_pct = (
-                (row["Employment 2034"] - row["Employment 2024"])
-                / row["Employment 2024"] * 100
-            )
-            growth_text = f"{growth_pct:+.1f}% by 2034"
+major_nodes = all_majors
 
-        occ_hover.append(
-            f"<b>{row['O*NET-SOC 2019 Title']}</b><br>"
-            f"AI exposure: {tier}"
-            + (f" ({beta:.0%})" if pd.notna(beta) else "")
-            + f"<br>Employment 2024: {row['Employment 2024']:,.0f}"
-            + f"<br>Median wage: {wage_text}"
-            + f"<br>Projected growth: {growth_text}"
-            + "<br><i>Click to see full profile</i>"
-        )
+occupation_nodes = (
+    sankey_df["O*NET-SOC 2019 Title"]
+    .drop_duplicates()
+    .tolist()
+)
 
-    fan_fig.add_trace(
-        go.Scatter(
-            x=[occ_x] * n_occ,
-            y=occ_y,
-            mode="markers+text",
-            marker=dict(size=occ_sizes, color=occ_colors, line=dict(width=1, color="white")),
-            text=occ_labels,
-            textposition="middle right",
-            textfont=dict(size=12, color="#222222"),
-            hovertext=occ_hover,
-            hoverinfo="text",
-            customdata=fan_df["O*NET-SOC 2019 Title"],
-            showlegend=False,
-        )
-    )
+# Major nodes are on the left; occupation nodes are on the right
+nodes = major_nodes + occupation_nodes
 
-    # ---- Legend (dummy traces, one per exposure tier) ----
+node_index = {
+    node: i
+    for i, node in enumerate(nodes)
+}
 
-    for tier_name, tier_color in [
-        ("Low", "#2CA02C"),
-        ("Moderate", "#F2C744"),
-        ("High", "#E67E22"),
-        ("Very High", "#B22222"),
-    ]:
-        fan_fig.add_trace(
-            go.Scatter(
-                x=[None], y=[None],
-                mode="markers",
-                marker=dict(size=10, color=tier_color),
-                name=tier_name,
-                showlegend=True,
-            )
-        )
 
-    fan_fig.update_layout(
-        title=f"{selected_cip} → top occupations by employment",
-        height=max(500, 55 * n_occ),
-        margin=dict(l=10, r=160, t=60, b=10),
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0,
-            title="AI exposure  ·  dot size = employment",
+# ---------------------------------------------------------
+# Create links
+# ---------------------------------------------------------
+
+sources = (
+    sankey_df["2020 CIP Title"]
+    .map(node_index)
+    .tolist()
+)
+
+targets = (
+    sankey_df["O*NET-SOC 2019 Title"]
+    .map(node_index)
+    .tolist()
+)
+
+# Each major → occupation relationship has a value of 1
+values = [1] * len(sankey_df)
+
+
+# ---------------------------------------------------------
+# Position nodes
+# ---------------------------------------------------------
+
+def evenly_spaced(n, start=0.01, end=0.99):
+    if n == 1:
+        return [0.5]
+
+    return np.linspace(start, end, n).tolist()
+
+
+x_positions = (
+    [0] * len(major_nodes)
+    + [1] * len(occupation_nodes)
+)
+
+y_positions = (
+    evenly_spaced(len(major_nodes))
+    + evenly_spaced(len(occupation_nodes))
+)
+
+
+# ---------------------------------------------------------
+# Build Sankey
+# ---------------------------------------------------------
+
+fig = go.Figure(
+    go.Sankey(
+        arrangement="fixed",
+
+        node=dict(
+            pad=15,
+            thickness=20,
+            label=nodes,
+            x=x_positions,
+            y=y_positions,
         ),
-        xaxis=dict(visible=False, range=[-2.2, occ_x + 2]),
-        yaxis=dict(visible=False),
-        plot_bgcolor="white",
+
+        link=dict(
+            source=sources,
+            target=targets,
+            value=values,
+        )
     )
+)
 
-    fan_event = st.plotly_chart(
-        fan_fig,
-        use_container_width=True,
-        key="major_fan_chart",
-        on_select="rerun",
-        selection_mode="points",
-    )
 
-    if fan_event.selection.points:
-        clicked_point = fan_event.selection.points[0]
-        clicked_occ = clicked_point.get("customdata")
-        if clicked_occ:
-            st.session_state.selected_occupation = clicked_occ
-            st.rerun()
+fig.update_layout(
+    title="Majors and Related Occupations",
+    height=700
+)
 
+
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
+
+# ---------------------------------------------------
 # Career Comparison Charts
 # ---------------------------------------------------
 
