@@ -146,13 +146,166 @@ cip_df["Occupation Code"] = (
 
 
 # ---------------------------------------------------
+# AI exposure lookup
+# ---------------------------------------------------
+
+# Collapse the AI-exposure table down to a 6-digit SOC code so it can
+# be joined against bls_df / cip_df's "Occupation Code" (which drops
+# the O*NET-SOC ".00" style suffix).
+openai_df["Occupation Code"] = (
+    openai_df["O*NET-SOC Code"]
+    .astype(str)
+    .str.split(".")
+    .str[0]
+)
+
+occ_beta_df = (
+    openai_df
+    .groupby("Occupation Code")["dv_rating_beta"]
+    .mean()
+    .reset_index()
+)
+
+# Light styling for the alternative-major cards further down.
+st.markdown(
+    """
+    <style>
+    .alt-badge {
+        display: inline-block;
+        border-radius: 6px;
+        padding: 2px 9px;
+        font-size: 0.82rem;
+        font-weight: 700;
+    }
+    .alt-shared {
+        color: #8A8A8A;
+        font-size: 0.85rem;
+        margin-top: 6px;
+    }
+    /* Tighten the native bordered container used for each
+       alternative-major card so the link button sits snugly with
+       the stats beneath it. */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        padding: 2px 4px;
+    }
+    /* Style the alternative-major buttons to look like text links
+       rather than boxed buttons -- these are the only buttons in
+       the app, so a global rule is safe. */
+    div[data-testid="stButton"] > button {
+        background: none;
+        border: none;
+        padding: 0;
+        margin: 0 0 2px 0;
+        color: #1A56DB;
+        font-weight: 700;
+        font-size: 1rem;
+        text-align: left;
+        box-shadow: none;
+    }
+    div[data-testid="stButton"] > button:hover {
+        text-decoration: underline;
+        color: #123E9E;
+        background: none;
+        border: none;
+    }
+    div[data-testid="stButton"] > button:focus {
+        box-shadow: none;
+        outline: none;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def _exposure_tier(beta):
+    if pd.isna(beta):
+        return "Unknown", "#B0B0B0"
+    if beta < 0.35:
+        return "Low", "#2CA02C"
+    if beta < 0.60:
+        return "Moderate", "#F2C744"
+    if beta < 0.80:
+        return "High", "#E67E22"
+    return "Very High", "#B22222"
+
+
+@st.cache_data
+def compute_major_exposure(cip_df, occ_beta_df):
+    """Average AI exposure + SOC code set for every major (CIP title).
+
+    Used to build the "related majors" panel: for any given major we
+    can look up other majors that lead to at least one of the same
+    occupations, and compare their average exposure scores.
+
+    Matching is done on the 6-digit SOC code ("Occupation Code"),
+    not the more granular O*NET-SOC code -- O*NET splits many broad
+    occupations into multiple detailed specializations with
+    different decimal suffixes, so matching on the full O*NET-SOC
+    code can miss real overlaps between related majors (e.g. two
+    majors both leading to "Software Developers" via different
+    O*NET specializations would look unrelated under an exact
+    O*NET-SOC match, but do share the same SOC code).
+    """
+
+    merged = cip_df.merge(
+        occ_beta_df,
+        on="Occupation Code",
+        how="left"
+    )
+
+    grouped = (
+        merged
+        .groupby("2020 CIP Title")
+        .agg(
+            avg_beta=("dv_rating_beta", "mean"),
+            soc_codes=("Occupation Code", lambda s: frozenset(s))
+        )
+        .reset_index()
+    )
+
+    return grouped
+
+
+major_exposure_df = compute_major_exposure(cip_df, occ_beta_df)
+
+
+@st.cache_data
+def compute_occupation_majors(cip_df):
+    """Reverse lookup: which majors (CIP titles) lead to each SOC code.
+
+    Used to show "majors related to this job" in the occupation
+    profile panel and on saved-job cards.
+    """
+
+    return (
+        cip_df
+        .groupby("Occupation Code")["2020 CIP Title"]
+        .apply(lambda s: sorted(set(s)))
+        .to_dict()
+    )
+
+
+occupation_majors_lookup = compute_occupation_majors(cip_df)
+
+
+# ---------------------------------------------------
 # Sidebar - Major Selection
 # ---------------------------------------------------
 #
-# NOTE: the selectbox now has key="major_select". This lets the
-# network graph below programmatically change the selected major
-# (by writing to st.session_state.major_select and calling
-# st.rerun()) when the user clicks a related-major node.
+# NOTE: the selectbox has key="major_select". Elsewhere in the app
+# (e.g. the "Explore" buttons on the lower-exposure alternative
+# cards), we can't write to st.session_state.major_select directly
+# once this widget has been instantiated this run -- Streamlit
+# forbids that. So those buttons instead set a "pending_major" flag
+# and call st.rerun(); this block applies that pending value BEFORE
+# the selectbox is created, which is allowed.
+
+if "pending_major" in st.session_state:
+    st.session_state.major_select = st.session_state.pop("pending_major")
+
+if "saved_jobs" not in st.session_state:
+    st.session_state.saved_jobs = {}
 
 st.subheader("Select a Major")
 
@@ -214,61 +367,48 @@ career_df = career_df.dropna(
     ]
 )
 
-
-
-
-
-
-# ---------------------------------------------------------
-# Major -> Occupations fan chart (top occupations by employment,
-# colored by AI exposure, sized by employment)
-# ---------------------------------------------------------
-#
-# One node for the selected major on the left. Curved lines fan out
-# to its top occupations by employment on the right. Each occupation
-# dot is colored by AI-exposure risk tier and sized by how many
-# people currently work in it. Clicking a dot selects that
-# occupation, which populates the detailed profile section further
-# down the page (same session_state.selected_occupation used by the
-# career-landscape bubble chart below).
-
-MAX_FAN_OCCUPATIONS = 10
-
-# Pull AI exposure onto the major's occupation/BLS data. career_df
-# was already built above as occupation_df merged with bls_df; here
-# we additionally bring in dv_rating_beta from openai_df, joined the
-# same way the existing "Selected Occupation Information" section
-# does it below (O*NET Code == O*NET-SOC Code).
-major_profile_df = career_df.merge(
-    openai_df[["O*NET-SOC Code", "dv_rating_beta"]],
-    left_on="O*NET Code",
-    right_on="O*NET-SOC Code",
+career_df = career_df.merge(
+    occ_beta_df,
+    on="Occupation Code",
     how="left"
 )
 
-st.header("Career Options")
 
-if major_profile_df.empty:
+# ---------------------------------------------------------
+# Major -> Occupations fan chart
+# ---------------------------------------------------------
+#
+# Left panel: the selected major plus a couple of lower-AI-exposure
+# alternative majors (with how many occupations they share).
+# Middle: the major fans directly out to its own occupations (styled
+# with soft S-curves, a light background, and a selection ring on the
+# clicked node to get closer to the reference mockup).
+# Right panel: a compact profile card for whatever occupation was
+# last clicked.
 
-    st.info(
-        f"No occupation data found for {selected_cip}."
-    )
+MAX_FAN_OCCUPATIONS = 20
+
+st.markdown("## Choose an Occupation")
+st.caption(
+    "Click a dot to expand its full profile on the right · "
+    "line color = AI exposure tier"
+)
+
+if career_df.empty:
+
+    st.info(f"No occupation data found for {selected_cip}.")
 
 else:
 
-    def _exposure_tier(beta):
-        if pd.isna(beta):
-            return "Unknown", "#B0B0B0"
-        if beta < 0.35:
-            return "Low", "#2CA02C"
-        if beta < 0.60:
-            return "Moderate", "#F2C744"
-        if beta < 0.80:
-            return "High", "#E67E22"
-        return "Very High", "#B22222"
+    selected_avg_beta = career_df["dv_rating_beta"].mean()
+    selected_median_wage = career_df["Median Annual Wage 2024"].median()
+    selected_codes = major_exposure_df.loc[
+        major_exposure_df["2020 CIP Title"] == selected_cip,
+        "soc_codes"
+    ].iloc[0]
 
     fan_df = (
-        major_profile_df
+        career_df
         .dropna(subset=["Employment 2024"])
         .sort_values("Employment 2024", ascending=False)
         .head(MAX_FAN_OCCUPATIONS)
@@ -277,132 +417,198 @@ else:
 
     n_occ = len(fan_df)
 
-    avg_beta = major_profile_df["dv_rating_beta"].mean()
-    median_wage_major = major_profile_df["Median Annual Wage 2024"].median()
-
-    subtitle_bits = []
-    if pd.notna(avg_beta):
-        subtitle_bits.append(f"avg AI exposure {avg_beta:.0%}")
-    if pd.notna(median_wage_major):
-        subtitle_bits.append(f"median wage ${median_wage_major:,.0f}")
-    subtitle = " · ".join(subtitle_bits)
-
-    if n_occ < MAX_FAN_OCCUPATIONS:
-        st.caption(
-            f"Showing all {n_occ} occupations with employment data for "
-            f"{selected_cip}."
-        )
-    else:
-        st.caption(
-            f"Showing the top {MAX_FAN_OCCUPATIONS} occupations for "
-            f"{selected_cip} by 2024 employment."
-        )
+    left_col, chart_col, profile_col = st.columns([1, 3.8, 1.1])
 
     # -----------------------------------------------------
-    # Positions: major at (0, 0); occupations at x = 3, evenly
-    # spaced vertically, largest employment on top.
+    # Left: your major + lower-exposure alternatives
     # -----------------------------------------------------
 
-    occ_x = 3
-    occ_y = [
-        (n_occ - 1) / 2 - i
-        for i in range(n_occ)
-    ]
+    with left_col:
 
-    max_employment = fan_df["Employment 2024"].max()
-    min_size, max_size = 14, 46
+        st.markdown("**YOUR MAJOR**")
+        wage_bit = f" · median wage ${selected_median_wage:,.0f}" if pd.notna(selected_median_wage) else ""
+        st.info(f"{selected_cip}\n\navg β {selected_avg_beta:.0%}{wage_bit}")
 
-    def _node_size(employment):
-        if max_employment <= 0:
-            return min_size
-        return min_size + (max_size - min_size) * np.sqrt(
-            employment / max_employment
+        st.markdown("**RELATED MAJORS**")
+
+        MAX_RELATED_MAJORS = 4
+
+        related = major_exposure_df[
+            major_exposure_df["2020 CIP Title"] != selected_cip
+        ].copy()
+
+        related["shared_count"] = related["soc_codes"].apply(
+            lambda s: len(s & selected_codes)
         )
 
-    fan_fig = go.Figure()
+        # Only surface majors that actually lead to at least one of
+        # the same occupations -- shared occupations is what makes
+        # a major "related" to this one, regardless of whether its
+        # exposure score is higher or lower.
+        related = related[related["shared_count"] > 0]
 
-    # ---- Curved fan lines (one trace per occupation) ----
+        if related.empty:
+            st.caption("No related majors share occupations with this one.")
+        else:
+            related["pts_diff"] = (related["avg_beta"] - selected_avg_beta) * 100
 
-    for i in range(n_occ):
-        y1 = occ_y[i]
-        _, color = _exposure_tier(fan_df.loc[i, "dv_rating_beta"])
-        mid_x = occ_x / 2
-        fan_fig.add_trace(
-            go.Scatter(
-                x=[0, mid_x, mid_x, occ_x],
-                y=[0, 0, y1, y1],
+            # Rank by relevance first (most shared occupations), then
+            # by exposure (lowest first) as the tiebreaker.
+            related = related.sort_values(
+                ["shared_count", "avg_beta"],
+                ascending=[False, True]
+            )
+
+            featured = related.head(MAX_RELATED_MAJORS)
+            remaining = related.iloc[MAX_RELATED_MAJORS:]
+
+            for _, rel in featured.iterrows():
+                _, badge_color = _exposure_tier(rel["avg_beta"])
+
+                is_lower = rel["pts_diff"] < 0
+                diff_color = "#2CA02C" if is_lower else "#B22222"
+                arrow = "↓" if is_lower else "↑"
+                direction_word = "lower" if is_lower else "higher"
+
+                with st.container(border=True):
+
+                    if st.button(
+                        rel["2020 CIP Title"],
+                        key=f"alt_select_{rel['2020 CIP Title']}",
+                    ):
+                        st.session_state.pending_major = rel["2020 CIP Title"]
+                        st.rerun()
+
+                    st.markdown(
+                        f"""
+                        <span class="alt-badge" style="background:{badge_color}; color:white;">
+                            avg β {rel['avg_beta']:.0%}
+                        </span>
+                        <span style="color:{diff_color}; font-weight:600; margin-left:6px; font-size:0.85rem;">
+                            {arrow} {abs(rel['pts_diff']):.0f} pts {direction_word}
+                        </span>
+                        <div class="alt-shared">{rel['shared_count']} shared occupations</div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+            # Anything beyond the top MAX_RELATED_MAJORS is still a
+            # genuine match (shares at least one occupation) -- just
+            # not one of the closest ones. Surface it instead of
+            # silently dropping it, since "related" is a mutual
+            # relationship even when one side has many more matches
+            # competing for the featured slots than the other.
+            if not remaining.empty:
+                with st.expander(f"+{len(remaining)} more related majors"):
+                    for _, rel in remaining.iterrows():
+                        if st.button(
+                            f"{rel['2020 CIP Title']} · {rel['shared_count']} shared · avg β {rel['avg_beta']:.0%}",
+                            key=f"alt_select_more_{rel['2020 CIP Title']}",
+                        ):
+                            st.session_state.pending_major = rel["2020 CIP Title"]
+                            st.rerun()
+
+    # -----------------------------------------------------
+    # Middle: the fan chart itself
+    # -----------------------------------------------------
+
+    with chart_col:
+
+        occ_y = [(n_occ - 1) / 2 - i for i in range(n_occ)]
+
+        OCC_NODE_SIZE = 20
+
+        major_x, occ_x = 0, 4
+        current_selection = st.session_state.get("selected_occupation")
+
+        fig = go.Figure()
+
+        # Smoothstep S-curve fan lines: leave the major node flat,
+        # ease into a curve, then arrive at the occupation flat --
+        # this reads much closer to the reference image than a
+        # simple spline through 4 control points.
+        t = np.linspace(0, 1, 24)
+        ease = 3 * t**2 - 2 * t**3  # smoothstep easing
+
+        for i in range(n_occ):
+            row = fan_df.loc[i]
+            _, color = _exposure_tier(row["dv_rating_beta"])
+            y1 = occ_y[i]
+            xs = major_x + t * (occ_x - major_x)
+            ys = ease * y1
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys,
                 mode="lines",
-                line=dict(shape="spline", width=1.5, color=color),
-                opacity=0.35,
+                line=dict(width=2, color=color),
+                opacity=0.55,
                 hoverinfo="none",
                 showlegend=False,
-            )
-        )
+            ))
 
-    # ---- Major node ----
-
-    fan_fig.add_trace(
-        go.Scatter(
-            x=[0],
-            y=[0],
+        # Major node
+        fig.add_trace(go.Scatter(
+            x=[major_x], y=[0],
             mode="markers+text",
-            marker=dict(size=34, color="#333333"),
-            text=[selected_cip],
+            marker=dict(size=34, color="#333333", line=dict(width=0)),
+            text=[f"<b>{selected_cip}</b>"],
             textposition="middle left",
-            textfont=dict(size=13, color="#222222"),
-            hovertext=[f"{selected_cip}<br>{subtitle}"],
+            textfont=dict(size=14, color="#222222"),
+            hovertext=[
+                f"{selected_cip}<br>avg AI exposure {selected_avg_beta:.0%}"
+                + (f"<br>median wage ${selected_median_wage:,.0f}" if pd.notna(selected_median_wage) else "")
+            ],
             hoverinfo="text",
             showlegend=False,
-        )
-    )
+        ))
 
-    # ---- Occupation nodes ----
+        # Occupation nodes
+        occ_colors, occ_sizes, occ_labels, occ_hover = [], [], [], []
+        occ_line_widths, occ_line_colors = [], []
 
-    occ_colors = [
-        _exposure_tier(fan_df.loc[i, "dv_rating_beta"])[1]
-        for i in range(n_occ)
-    ]
-    occ_sizes = [
-        _node_size(fan_df.loc[i, "Employment 2024"])
-        for i in range(n_occ)
-    ]
+        for i in range(n_occ):
+            row = fan_df.loc[i]
+            tier, color = _exposure_tier(row["dv_rating_beta"])
+            beta = row["dv_rating_beta"]
+            title = row["O*NET-SOC 2019 Title"]
+            occ_colors.append(color)
+            occ_sizes.append(OCC_NODE_SIZE)
 
-    occ_labels = []
-    occ_hover = []
-    for i in range(n_occ):
-        row = fan_df.loc[i]
-        beta = row["dv_rating_beta"]
-        tier, _ = _exposure_tier(beta)
-        beta_text = f" ({beta:.0%})" if pd.notna(beta) else ""
-        occ_labels.append(f"{row['O*NET-SOC 2019 Title']}{beta_text}")
+            is_selected = title == current_selection
+            occ_line_widths.append(3 if is_selected else 1)
+            occ_line_colors.append("#111111" if is_selected else "white")
 
-        wage = row["Median Annual Wage 2024"]
-        wage_text = f"${wage:,.0f}" if pd.notna(wage) else "N/A"
+            beta_text = f" ({beta:.0%})" if pd.notna(beta) else ""
+            occ_labels.append(f"{title}{beta_text}")
 
-        growth_text = "N/A"
-        if pd.notna(row.get("Employment 2034")) and row["Employment 2024"]:
-            growth_pct = (
-                (row["Employment 2034"] - row["Employment 2024"])
-                / row["Employment 2024"] * 100
+            wage = row["Median Annual Wage 2024"]
+            wage_text = f"${wage:,.0f}" if pd.notna(wage) else "N/A"
+
+            growth_text = "N/A"
+            if pd.notna(row.get("Employment 2034")) and row["Employment 2024"]:
+                growth_pct = (
+                    (row["Employment 2034"] - row["Employment 2024"])
+                    / row["Employment 2024"] * 100
+                )
+                growth_text = f"{growth_pct:+.1f}% by 2034"
+
+            occ_hover.append(
+                f"<b>{title}</b><br>"
+                f"AI exposure: {tier}" + (f" ({beta:.0%})" if pd.notna(beta) else "")
+                + f"<br>Employment 2024: {row['Employment 2024']:,.0f}"
+                + f"<br>Median wage: {wage_text}"
+                + f"<br>Projected growth: {growth_text}"
+                + "<br><i>Click to see full profile</i>"
             )
-            growth_text = f"{growth_pct:+.1f}% by 2034"
 
-        occ_hover.append(
-            f"<b>{row['O*NET-SOC 2019 Title']}</b><br>"
-            f"AI exposure: {tier}"
-            + (f" ({beta:.0%})" if pd.notna(beta) else "")
-            + f"<br>Employment 2024: {row['Employment 2024']:,.0f}"
-            + f"<br>Median wage: {wage_text}"
-            + f"<br>Projected growth: {growth_text}"
-            + "<br><i>Click to see full profile</i>"
-        )
-
-    fan_fig.add_trace(
-        go.Scatter(
+        fig.add_trace(go.Scatter(
             x=[occ_x] * n_occ,
             y=occ_y,
             mode="markers+text",
-            marker=dict(size=occ_sizes, color=occ_colors, line=dict(width=1, color="white")),
+            marker=dict(
+                size=occ_sizes,
+                color=occ_colors,
+                line=dict(width=occ_line_widths, color=occ_line_colors),
+            ),
             text=occ_labels,
             textposition="middle right",
             textfont=dict(size=12, color="#222222"),
@@ -410,620 +616,212 @@ else:
             hoverinfo="text",
             customdata=fan_df["O*NET-SOC 2019 Title"],
             showlegend=False,
-        )
-    )
+        ))
 
-    # ---- Legend (dummy traces, one per exposure tier) ----
-
-    for tier_name, tier_color in [
-        ("Low", "#2CA02C"),
-        ("Moderate", "#F2C744"),
-        ("High", "#E67E22"),
-        ("Very High", "#B22222"),
-    ]:
-        fan_fig.add_trace(
-            go.Scatter(
+        # Legend
+        for tier_name, tier_color in [
+            ("Low", "#2CA02C"),
+            ("Moderate", "#F2C744"),
+            ("High", "#E67E22"),
+            ("Very High", "#B22222"),
+        ]:
+            fig.add_trace(go.Scatter(
                 x=[None], y=[None],
                 mode="markers",
                 marker=dict(size=10, color=tier_color),
                 name=tier_name,
                 showlegend=True,
-            )
+            ))
+
+        if n_occ < len(career_df.dropna(subset=["Employment 2024"])):
+            st.caption(f"Showing the top {n_occ} occupations for {selected_cip} by 2024 employment.")
+
+        fig.update_layout(
+            height=max(480, 42 * n_occ),
+            margin=dict(l=10, r=40, t=50, b=10),
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom", y=1.02,
+                xanchor="left", x=0,
+                title="AI exposure",
+                font=dict(size=12),
+            ),
+            xaxis=dict(visible=False, range=[-2.2, occ_x + 4.5]),
+            yaxis=dict(visible=False),
+            plot_bgcolor="#FAFAF8",
+            paper_bgcolor="#FAFAF8",
+            font=dict(family="Helvetica, Arial, sans-serif"),
         )
 
-    fan_fig.update_layout(
-        title=f"{selected_cip} → top occupations by employment",
-        height=max(500, 55 * n_occ),
-        margin=dict(l=10, r=160, t=60, b=10),
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0,
-            title="AI exposure  ·  dot size = employment",
-        ),
-        xaxis=dict(visible=False, range=[-2.2, occ_x + 2]),
-        yaxis=dict(visible=False),
-        plot_bgcolor="white",
-    )
-
-    fan_event = st.plotly_chart(
-        fan_fig,
-        use_container_width=True,
-        key="major_fan_chart",
-        on_select="rerun",
-        selection_mode="points",
-    )
-
-    if fan_event.selection.points:
-        clicked_point = fan_event.selection.points[0]
-        clicked_occ = clicked_point.get("customdata")
-        if clicked_occ:
-            st.session_state.selected_occupation = clicked_occ
-            st.rerun()
-
-# Career Comparison Charts
-# ---------------------------------------------------
-
-st.header(
-    "Career Options"
-)
-
-st.write(
-    "Click a career bubble to view details."
-)
-
-
-# ---------------------------------------------------
-# Employment Chart
-# ---------------------------------------------------
-
-bubble_df = career_df[
-    [
-        "O*NET-SOC 2019 Title",
-        "Employment 2024",
-        "Median Annual Wage 2024",
-        "Occupational Openings, 2024-2034 Annual Average",
-        "Typical Entry-Level Education"
-    ]
-].copy()
-
-bubble_df = bubble_df.dropna(
-    subset=[
-        "Employment 2024",
-        "Median Annual Wage 2024"
-    ]
-)
-
-education_order = [
-    "No formal educational credential",
-    "High school diploma or equivalent",
-    "Some college, no degree",
-    "Postsecondary nondegree award",
-    "Associate's degree",
-    "Bachelor's degree",
-    "Master's degree",
-    "Doctoral or professional degree"
-]
-
-bubble_df["Typical Entry-Level Education"] = pd.Categorical(
-    bubble_df["Typical Entry-Level Education"],
-    categories=education_order,
-    ordered=True
-)
-
-education_colors = {
-    "No formal educational credential": "gray",
-    "High school diploma or equivalent": "red",
-    "Some college, no degree": "orange",
-    "Postsecondary nondegree award": "gold",
-    "Associate's degree": "green",
-    "Bachelor's degree": "blue",
-    "Master's degree": "purple",
-    "Doctoral or professional degree": "black"
-}
-
-bubble_fig = px.scatter(
-    bubble_df,
-    x="Median Annual Wage 2024",
-    y="Employment 2024",
-    size="Occupational Openings, 2024-2034 Annual Average",
-    size_max=40,  
-    color="Typical Entry-Level Education",
-    color_discrete_map=education_colors,
-    hover_name="O*NET-SOC 2019 Title",
-    custom_data=["O*NET-SOC 2019 Title"],
-    title="Career Landscape"
-)
-
-bubble_fig.update_layout(
-    height=400,
-    xaxis_title="Median Annual Wage ($)",
-    yaxis_title="Employment (2024)",
-    legend_title="Education",
-    hovermode="closest",
-    clickmode="event+select"
-)
-
-bubble_fig.update_traces(
-    hovertemplate="%{hovertext}<extra></extra>",
-    mode="markers",
-    selected=dict(
-        marker=dict(opacity=1)
-    ),
-    unselected=dict(
-        marker=dict(opacity=0.2)
-    )
-)
-
-chart_col, info_col = st.columns([3, 1])
-
-with chart_col:
-
-    bubble_event = st.plotly_chart(
-        bubble_fig,
-        use_container_width=True,
-        key="career_bubble_chart",
-        on_select="rerun",
-        selection_mode="points"
-    )
-
-    if bubble_event.selection.points:
-
-        st.session_state.selected_occupation = (
-            # bubble_event.selection.points[0]["hovertext"]
-            bubble_event.selection.points[0]["customdata"][0]
+        fan_event = st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key="major_fan_chart",
+            on_select="rerun",
+            selection_mode="points",
         )
-    
+
+        if fan_event.selection.points:
+            clicked_title = fan_event.selection.points[0].get("customdata")
+            if clicked_title:
+                st.session_state.selected_occupation = clicked_title
+                st.rerun()
+
+    # -----------------------------------------------------
+    # Right: occupation profile card
+    # -----------------------------------------------------
+
+    with profile_col:
+
+        st.markdown("**OCCUPATION PROFILE**")
+
+        current_selection = st.session_state.get("selected_occupation")
+
+        if not current_selection:
+            st.caption("Click an occupation to see its full profile.")
+        else:
+            prof_row = fan_df[fan_df["O*NET-SOC 2019 Title"] == current_selection]
+
+            if prof_row.empty:
+                st.caption("No profile data available for this occupation yet.")
+            else:
+                prof_row = prof_row.iloc[0]
+                beta = prof_row.get("dv_rating_beta")
+                tier, tier_color = _exposure_tier(beta)
+
+                st.markdown(f"**{current_selection}**")
+                st.caption(f"SOC {prof_row.get('Occupation Code', 'N/A')}")
+
+                if pd.notna(beta):
+                    st.error(f"AI exposure (β): {beta:.0%} · {tier}", icon="🤖")
+
+                wage = prof_row.get("Median Annual Wage 2024")
+                wage_display = f"${wage:,.0f}" if pd.notna(wage) else "N/A"
+                st.metric("Median wage", wage_display)
+
+                emp = prof_row.get("Employment 2024")
+                employment_display = f"{emp:,.1f}k" if pd.notna(emp) else "N/A"
+                st.metric("Employment 2024", employment_display)
+
+                growth_display = "N/A"
+                if pd.notna(prof_row.get("Employment 2034")) and emp:
+                    growth_pct = (prof_row["Employment 2034"] - emp) / emp * 100
+                    growth_display = f"{growth_pct:+.1f}% by 2034"
+                    st.metric("Projected growth", growth_display)
+
+                openings = prof_row.get("Occupational Openings, 2024-2034 Annual Average")
+                openings_display = f"{openings:,.1f}k" if pd.notna(openings) else "N/A"
+                if pd.notna(openings):
+                    st.metric("Annual openings", openings_display)
+
+                education = prof_row.get("Typical Entry-Level Education", "N/A")
+                st.metric("Education", education)
+
+                soc_code = prof_row.get("Occupation Code")
+                related_majors_for_job = [
+                    m for m in occupation_majors_lookup.get(soc_code, [])
+                    if m != selected_cip
+                ]
+
+                st.markdown("**Related majors**")
+                if related_majors_for_job:
+                    MAX_JOB_RELATED_MAJORS = 5
+                    for m in related_majors_for_job[:MAX_JOB_RELATED_MAJORS]:
+                        if st.button(
+                            m,
+                            key=f"occ_related_major_{current_selection}_{m}",
+                        ):
+                            st.session_state.pending_major = m
+                            st.rerun()
+                    if len(related_majors_for_job) > MAX_JOB_RELATED_MAJORS:
+                        st.caption(f"+{len(related_majors_for_job) - MAX_JOB_RELATED_MAJORS} more")
+                else:
+                    st.caption("No other majors in the crosswalk lead to this occupation.")
+
+                already_saved = current_selection in st.session_state.saved_jobs
+
+                if st.button(
+                    "✅ Saved" if already_saved else "💾 Save Job",
+                    key=f"save_job_{current_selection}",
+                    use_container_width=True,
+                    disabled=already_saved,
+                ):
+                    st.session_state.saved_jobs[current_selection] = {
+                        "title": current_selection,
+                        "major": selected_cip,
+                        "soc_code": prof_row.get("Occupation Code", "N/A"),
+                        "beta_display": f"{beta:.0%} · {tier}" if pd.notna(beta) else "N/A",
+                        "tier_color": tier_color,
+                        "wage_display": wage_display,
+                        "employment_display": employment_display,
+                        "growth_display": growth_display,
+                        "openings_display": openings_display,
+                        "education": education,
+                        "related_majors": related_majors_for_job,
+                    }
+                    st.rerun()
+
 
 # ---------------------------------------------------
-# Initialize
+# Saved Jobs
 # ---------------------------------------------------
-
-if "selected_occupation" not in st.session_state:
-    st.session_state.selected_occupation = None
-
-
-# Get the current selection
-selected_occupation = st.session_state.selected_occupation
-
-
-if selected_occupation is None:
-    # st.info("Click a career bubble to view details.")
-    st.stop()
-
-# ---------------------------------------------------
-# Selected Occupation Information
-# ---------------------------------------------------
+#
+# A simple side-by-side comparison board: every occupation the
+# student has saved from the profile panel above, shown as a card
+# with the same info (wage, employment, growth, openings, education,
+# AI exposure), with a way to remove it from the list.
 
 st.divider()
+st.header("Saved Jobs")
 
-st.header(
-    selected_occupation
-)
+if not st.session_state.saved_jobs:
 
-
-selected_onet = cip_df[
-    cip_df["O*NET-SOC 2019 Title"]
-    == selected_occupation
-][
-    [
-        "O*NET-SOC 2019 Code",
-        "O*NET-SOC 2019 Title",
-        "O*NET Code",
-        "Occupation Code"
-    ]
-]
-
-
-selected_soc_code = (
-    selected_onet["Occupation Code"]
-    .iloc[0]
-)
-
-# AI Exposure Metrics
-
-occupation_aiexposure = openai_df.merge(
-    selected_onet,
-    left_on="O*NET-SOC Code",
-    right_on="O*NET-SOC 2019 Code",
-    how="inner"
-)
-
-
-# BLS Metrics
-
-bls_match = bls_df[
-    bls_df["Occupation Code"]
-    == selected_soc_code
-]
-
-
-if not bls_match.empty:
-
-    with info_col:
-
-        if selected_occupation is None:
-            st.info("Click a career bubble to view details.")
-
-        else:
-
-            row = career_df[
-                career_df["O*NET-SOC 2019 Title"] == selected_occupation
-            ]
-
-            if not row.empty:
-
-                row = row.iloc[0]
-
-                st.subheader(selected_occupation)
-
-                st.metric(
-                    "Employment",
-                    f"{row['Employment 2024']:,.1f}"
-                )
-
-                wage = row["Median Annual Wage 2024"]
-
-                if pd.isna(wage):
-                    st.metric("Median Wage", "N/A")
-                else:
-                    st.metric(
-                        "Median Wage",
-                        f"${wage:,.0f}"
-                    )
-
-                st.metric(
-                    "Education",
-                    row["Typical Entry-Level Education"]
-                )
-
-                if occupation_aiexposure.empty:
-                    st.warning(
-                        f"No AI exposure data available for {selected_occupation}."
-                    )
-                else:
-                    row = occupation_aiexposure.iloc[0]
-                    st.metric(
-                        "AI Exposure Rating",
-                        f"{row['dv_rating_beta']:.0%}"
-                    )
+    st.caption("Save an occupation from the profile panel above to start comparing jobs here.")
 
 else:
 
-    st.warning(
-        "No matching BLS data found."
-    )
-
-
-abilities_col, skills_col, activities_col = st.columns(3)
-
-# ---------------------------------------------------
-# Abilities Visualization
-# ---------------------------------------------------
-
-with abilities_col:
-    st.subheader(
-        "Occupation Ability Profile"
-    )
-
-
-    occupation_abilities = abilities_df.merge(
-        selected_onet,
-        left_on="O*NET-SOC Code",
-        right_on="O*NET-SOC 2019 Code",
-        how="inner"
-    )
-
-
-    if occupation_abilities.empty:
-
-        st.warning(
-            f"No ability data available for {selected_occupation}."
-        )
-
-    else:
-
-        ability_profile = occupation_abilities.pivot_table(
-            index=[
-                "O*NET-SOC 2019 Title",
-                "Element Name"
-            ],
-            columns="Scale ID",
-            values="Data Value"
-        ).reset_index()
-
-
-        ability_profile = ability_profile.rename(
-            columns={
-                "O*NET-SOC 2019 Title": "Occupation",
-                "Element Name": "Ability",
-                "IM": "Importance",
-                "LV": "Level"
-            }
-        )
-
-
-        ability_profile = (
-            ability_profile
-            .sort_values(
-                "Importance",
-                ascending=False
-            )
-            .head(10)
-        )
-
-
-        plot_df = (
-            ability_profile
-            .groupby(
-                [
-                    "Importance",
-                    "Level"
-                ]
-            )
-            .agg(
-                Ability=("Ability", ", ".join)
-            )
-            .reset_index()
-        )
-
-
-        fig = px.scatter(
-            plot_df,
-            x="Importance",
-            y="Level",
-            color="Ability",
-            hover_name="Ability",
-            hover_data={
-                "Ability": False,
-                "Importance": ":.2f",
-                "Level": ":.2f"
-            },
-            title=f"Ability Profile: {selected_occupation}"
-        )
-
-
-        fig.update_layout(
-            xaxis_title="Importance",
-            yaxis_title="Required Level",
-            legend_title="Ability",
-            height=550, 
-            margin=dict(b=150),
-            legend=dict(
-                orientation="v",
-                yanchor="top",
-                y=-0.25,
-                xanchor="center",
-                x=0.5,
-                font=dict(size=9)
-            )
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-
-# ---------------------------------------------------
-# Skills Visualization
-# ---------------------------------------------------
-
-with skills_col:
-
-    st.subheader(
-        "Occupation Skill Profile"
-    )
-
-
-    occupation_skills = skills_df.merge(
-        selected_onet,
-        left_on="O*NET-SOC Code",
-        right_on="O*NET-SOC 2019 Code",
-        how="inner"
-    )
-
-
-    if occupation_skills.empty:
-
-        st.warning(
-            f"No skill data available for {selected_occupation}."
-        )
-
-    else:
-
-        skill_profile = occupation_skills.pivot_table(
-            index=[
-                "O*NET-SOC 2019 Title",
-                "Element Name"
-            ],
-            columns="Scale ID",
-            values="Data Value"
-        ).reset_index()
-
-
-        skill_profile = skill_profile.rename(
-            columns={
-                "O*NET-SOC 2019 Title": "Occupation",
-                "Element Name": "Skill",
-                "IM": "Importance",
-                "LV": "Level"
-            }
-        )
-
-
-        skill_profile = (
-            skill_profile
-            .sort_values(
-                "Importance",
-                ascending=False
-            )
-            .head(10)
-        )
-
-
-        plot_df = (
-            skill_profile
-            .groupby(
-                [
-                    "Importance",
-                    "Level"
-                ]
-            )
-            .agg(
-                Skill=("Skill", ", ".join)
-            )
-            .reset_index()
-        )
-
-
-        fig = px.scatter(
-            plot_df,
-            x="Importance",
-            y="Level",
-            color="Skill",
-            hover_name="Skill",
-            hover_data={
-                "Skill": False,
-                "Importance": ":.2f",
-                "Level": ":.2f"
-            },
-            title=f"Skill Profile: {selected_occupation}"
-        )
-
-
-        fig.update_layout(
-            xaxis_title="Importance",
-            yaxis_title="Required Level",
-            legend_title="Skill",   
-            height=550,    
-            margin=dict(b=150),
-            legend=dict(
-                orientation="v",
-                yanchor="top",
-                y=-0.25,
-                xanchor="center",
-                x=0.5,
-                font=dict(size=9)
-            )
-        )
-
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-
-# ---------------------------------------------------
-# Activities Visualization
-# ---------------------------------------------------
-
-with activities_col:
-
-    st.subheader(
-        "Occupation Work Activities"
-    )
-
-
-    occupation_activities = activities_df.merge(
-        selected_onet,
-        left_on="O*NET-SOC Code",
-        right_on="O*NET-SOC 2019 Code",
-        how="inner"
-    )
-
-
-    if occupation_activities.empty:
-
-        st.warning(
-            f"No activity data available for {selected_occupation}."
-        )
-
-    else:
-
-        activity_profile = occupation_activities.pivot_table(
-            index=[
-                "O*NET-SOC 2019 Title",
-                "Element ID",
-                "Element Name"
-            ],
-            columns="Scale ID",
-            values="Data Value"
-        ).reset_index()
-
-
-        activity_profile = activity_profile.rename(
-            columns={
-                "O*NET-SOC 2019 Title": "Occupation",
-                "Element Name": "Activity",
-                "IM": "Importance",
-                "LV": "Level"
-            }
-        )
-
-
-        activity_profile = (
-            activity_profile
-            .sort_values(
-                "Importance",
-                ascending=False
-            )
-            .head(10)
-        )
-
-
-        plot_df = (
-            activity_profile
-            .groupby(
-                [
-                    "Importance",
-                    "Level"
-                ]
-            )
-            .agg(
-                Activity=("Activity", ", ".join)
-            )
-            .reset_index()
-        )
-
-
-        fig = px.scatter(
-            plot_df,
-            x="Importance",
-            y="Level",
-            color="Activity",
-            hover_name="Activity",
-            hover_data={
-                "Activity": False,
-                "Importance": ":.2f",
-                "Level": ":.2f"
-            },
-            title=f"Activity Profile: {selected_occupation}"
-        )
-
-
-        fig.update_layout(
-            xaxis_title="Importance",
-            yaxis_title="Required Level",
-            legend_title="Activity",
-            height=550,
-            margin=dict(b=150),
-            legend=dict(
-                orientation="v",
-                yanchor="top",
-                y=-0.25,
-                xanchor="center",
-                x=0.5,
-                font=dict(size=9)
-            )
-        )
-
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
+    CARDS_PER_ROW = 3
+    saved_list = list(st.session_state.saved_jobs.values())
+
+    for row_start in range(0, len(saved_list), CARDS_PER_ROW):
+
+        row_jobs = saved_list[row_start:row_start + CARDS_PER_ROW]
+        row_cols = st.columns(CARDS_PER_ROW)
+
+        for col, job in zip(row_cols, row_jobs):
+
+            with col:
+                with st.container(border=True):
+
+                    st.markdown(f"**{job['title']}**")
+                    st.caption(f"SOC {job['soc_code']} · via {job['major']}")
+
+                    st.markdown(
+                        f"""
+                        <span class="alt-badge" style="background:{job['tier_color']}; color:white;">
+                            AI exposure {job['beta_display']}
+                        </span>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    st.write(f"**Median wage:** {job['wage_display']}")
+                    st.write(f"**Employment 2024:** {job['employment_display']}")
+                    st.write(f"**Projected growth:** {job['growth_display']}")
+                    st.write(f"**Annual openings:** {job['openings_display']}")
+                    st.write(f"**Education:** {job['education']}")
+
+                    related_majors_saved = job.get("related_majors", [])
+                    if related_majors_saved:
+                        st.write(f"**Related majors:** {', '.join(related_majors_saved)}")
+                    else:
+                        st.write("**Related majors:** None")
+
+                    if st.button(
+                        "🗑 Remove",
+                        key=f"remove_saved_{job['title']}",
+                        use_container_width=True,
+                    ):
+                        del st.session_state.saved_jobs[job["title"]]
+                        st.rerun()
