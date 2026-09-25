@@ -41,26 +41,11 @@ def load_data():
         "occ_level.csv"
     )
 
-    abilities_df = pd.read_csv(
-        "Abilities.csv"
-    )
-
-    skills_df = pd.read_csv(
-        "Essential_Skills.csv"
-    )
-
-    activities_df = pd.read_csv(
-        "Work_Activities.csv"
-    )
-
     return (
         cip_df,
         bls_df,
         occupation_data_df,
-        openai_df,
-        abilities_df,
-        skills_df,
-        activities_df
+        openai_df
     )
 
 
@@ -68,10 +53,7 @@ def load_data():
     cip_df,
     bls_df,
     occupation_data_df,
-    openai_df,
-    abilities_df,
-    skills_df,
-    activities_df
+    openai_df
 
 ) = load_data()
 
@@ -196,13 +178,6 @@ st.markdown(
         font-size: 0.82rem;
         font-weight: 700;
     }
-    .alt-wage {
-        display: inline-block;
-        color: #374151;
-        font-weight: 600;
-        font-size: 0.85rem;
-        margin-left: 6px;
-    }
     .alt-shared {
         color: #8A8A8A;
         font-size: 0.85rem;
@@ -291,8 +266,8 @@ st.markdown(
         opacity: 1;
     }
     /* Tighten the native bordered container used for each
-       alternative-major card (and the "your major" card) so the
-       link button / title sits snugly with the stats beneath it. */
+       alternative-major card so the link button sits snugly with
+       the stats beneath it. */
     div[data-testid="stVerticalBlockBorderWrapper"] {
         padding: 2px 4px;
     }
@@ -320,80 +295,6 @@ st.markdown(
         box-shadow: none;
         outline: none;
     }
-    /* HTML/CSS "meter list" used for the Skills/Abilities/Work
-       Activities section: one row per element, a label, a filled
-       horizontal bar sized to its Importance score, and the value. */
-    .meter-list {
-        margin-top: 4px;
-    }
-    .meter-row {
-        margin-bottom: 10px;
-    }
-    .meter-label {
-        font-size: 0.85rem;
-        font-weight: 600;
-        color: #1F2937;
-        margin-bottom: 3px;
-    }
-    .meter-track-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .meter-track {
-        flex: 1;
-        height: 8px;
-        border-radius: 4px;
-        background: #E5E7EB;
-        overflow: hidden;
-    }
-    .meter-fill {
-        height: 100%;
-        border-radius: 4px;
-    }
-    .meter-value {
-        font-size: 0.78rem;
-        font-weight: 700;
-        color: #374151;
-        width: 24px;
-        text-align: right;
-        flex-shrink: 0;
-    }
-    .meter-level {
-        font-size: 0.72rem;
-        color: #9CA3AF;
-        margin-top: 1px;
-    }
-    /* AI-exposure tier legend shown above the occupation bar chart --
-       a plain HTML row (rather than Plotly's own legend) so it
-       always spans the full chart column and sits flush above the
-       whole chart, y-axis labels included. */
-    .tier-legend {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 14px;
-        margin: 4px 0 6px 0;
-    }
-    .tier-legend-title {
-        font-size: 0.82rem;
-        font-weight: 700;
-        color: #374151;
-    }
-    .tier-legend-item {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        font-size: 0.82rem;
-        color: #374151;
-    }
-    .tier-dot {
-        display: inline-block;
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        flex-shrink: 0;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -401,19 +302,10 @@ st.markdown(
 
 
 def _exposure_tier(beta):
-    """Five equal-width (20-point) bands across the full 0-100% range
-    of AI exposure (beta), instead of the earlier four uneven bands
-    (35/60/80 cutoffs). The old "Moderate" band spanned 25 points
-    (35-60%) and visually swallowed most occupations into one color;
-    splitting into five even 20-point bands spreads occupations
-    across more colors instead of clustering into one.
-    """
     if pd.isna(beta):
         return "Unknown", "#B0B0B0"
-    if beta < 0.20:
-        return "Very Low", "#2CA02C"
-    if beta < 0.40:
-        return "Low", "#8BC34A"
+    if beta < 0.35:
+        return "Low", "#2CA02C"
     if beta < 0.60:
         return "Moderate", "#F2C744"
     if beta < 0.80:
@@ -435,95 +327,13 @@ def _metric_html(label, value, color="#0F1116"):
     )
 
 
-def _top_elements_for_occupation(df, onet_code, top_n=10):
-    """Pivot an O*NET content-model file (Abilities / Essential Skills /
-    Work Activities) down to the top N elements for a single occupation.
-
-    These three files share the same shape: one row per
-    (occupation, element, scale), where Scale ID "IM" = Importance
-    (1-5) and "LV" = Level -- O*NET's own definition of Level is
-    "the amount needed on the job" (0-7). Ranked by Importance,
-    since that's the more intuitive "how much does this matter for
-    this job" number -- Level is shown as secondary detail under
-    each row.
-    """
-
-    if onet_code is None:
-        return pd.DataFrame(columns=["Element Name", "Importance", "Level"])
-
-    subset = df[
-        df["O*NET-SOC Code"].astype(str).str.strip() == str(onet_code).strip()
-    ]
-
-    if subset.empty:
-        return pd.DataFrame(columns=["Element Name", "Importance", "Level"])
-
-    pivoted = subset.pivot_table(
-        index="Element Name",
-        columns="Scale ID",
-        values="Data Value",
-        aggfunc="mean",
-    ).reset_index()
-
-    pivoted = pivoted.rename(columns={"IM": "Importance", "LV": "Level"})
-
-    if "Importance" not in pivoted.columns:
-        pivoted["Importance"] = np.nan
-    if "Level" not in pivoted.columns:
-        pivoted["Level"] = np.nan
-
-    pivoted = (
-        pivoted
-        .dropna(subset=["Importance"])
-        .sort_values("Importance", ascending=False)
-        .head(top_n)
-    )
-
-    return pivoted
-
-
-def _meter_list_html(df, accent_color):
-    """A compact HTML/CSS "meter list": one row per element, each a
-    label above a horizontal filled bar sized to its Importance score
-    (0-5) with the numeric value at the end. Level (0-7) is shown as
-    small muted text under the label rather than a second visual
-    channel, so the list stays skimmable at a glance -- no legend,
-    no axis, no chart to interpret, just a ranked list of bars.
-    """
-
-    d = df.sort_values("Importance", ascending=False).reset_index(drop=True)
-
-    rows_html = []
-    for _, row in d.iterrows():
-        pct = max(0.0, min(100.0, (row["Importance"] / 5) * 100))
-        level_html = ""
-        if pd.notna(row.get("Level")):
-            level_html = f'<div class="meter-level">Amount needed on job: {row["Level"]:.1f}/7</div>'
-
-        rows_html.append(
-            '<div class="meter-row">'
-            f'<div class="meter-label">{html.escape(str(row["Element Name"]))}</div>'
-            '<div class="meter-track-row">'
-            '<div class="meter-track">'
-            f'<div class="meter-fill" style="width:{pct:.0f}%; background:{accent_color};"></div>'
-            '</div>'
-            f'<div class="meter-value">{row["Importance"]:.1f}</div>'
-            '</div>'
-            f'{level_html}'
-            '</div>'
-        )
-
-    return '<div class="meter-list">' + "".join(rows_html) + '</div>'
-
-
 @st.cache_data
-def compute_major_exposure(cip_df, occ_beta_df, bls_df):
-    """Average AI exposure, median wage, and SOC code set for every
-    major (CIP title).
+def compute_major_exposure(cip_df, occ_beta_df):
+    """Average AI exposure + SOC code set for every major (CIP title).
 
     Used to build the "related majors" panel: for any given major we
     can look up other majors that lead to at least one of the same
-    occupations, and compare their average exposure scores and wages.
+    occupations, and compare their average exposure scores.
 
     Matching is done on the 6-digit SOC code ("Occupation Code"),
     not the more granular O*NET-SOC code -- O*NET splits many broad
@@ -541,18 +351,11 @@ def compute_major_exposure(cip_df, occ_beta_df, bls_df):
         how="left"
     )
 
-    merged = merged.merge(
-        bls_df[["Occupation Code", "Median Annual Wage 2024"]],
-        on="Occupation Code",
-        how="left"
-    )
-
     grouped = (
         merged
         .groupby("2020 CIP Title")
         .agg(
             avg_beta=("dv_rating_beta", "mean"),
-            median_wage=("Median Annual Wage 2024", "median"),
             soc_codes=("Occupation Code", lambda s: frozenset(s))
         )
         .reset_index()
@@ -561,7 +364,7 @@ def compute_major_exposure(cip_df, occ_beta_df, bls_df):
     return grouped
 
 
-major_exposure_df = compute_major_exposure(cip_df, occ_beta_df, bls_df)
+major_exposure_df = compute_major_exposure(cip_df, occ_beta_df)
 
 
 @st.cache_data
@@ -733,32 +536,8 @@ else:
     with left_col:
 
         st.markdown("**YOUR MAJOR**")
-
-        your_tier, your_badge_color = _exposure_tier(selected_avg_beta)
-        your_wage_display = (
-            f"${selected_median_wage:,.0f}"
-            if pd.notna(selected_median_wage)
-            else "N/A"
-        )
-
-        # Styled the same way as the RELATED MAJORS cards below (a
-        # bordered container with a bold title and an exposure badge
-        # + median wage line) instead of a plain st.info box, so the
-        # two sections read as one consistent card style.
-        with st.container(border=True):
-            st.markdown(
-                f'<span style="font-weight:700; font-size:1rem;">{selected_cip}</span>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f"""
-                <span class="alt-badge" style="background:{your_badge_color}; color:white;">
-                    avg β {selected_avg_beta:.0%}
-                </span>
-                <span class="alt-wage">median wage {your_wage_display}</span>
-                """,
-                unsafe_allow_html=True,
-            )
+        wage_bit = f" · median wage ${selected_median_wage:,.0f}" if pd.notna(selected_median_wage) else ""
+        st.info(f"{selected_cip}\n\navg β {selected_avg_beta:.0%}{wage_bit}")
 
         st.markdown("**RELATED MAJORS**")
 
@@ -801,12 +580,6 @@ else:
                 arrow = "↓" if is_lower else "↑"
                 direction_word = "lower" if is_lower else "higher"
 
-                rel_wage_display = (
-                    f"${rel['median_wage']:,.0f}"
-                    if pd.notna(rel["median_wage"])
-                    else "N/A"
-                )
-
                 # The occupations (as shown in this major's own bar
                 # chart) that overlap with the related major -- shown
                 # in a hover tooltip on "N shared occupations" so a
@@ -835,11 +608,9 @@ else:
                         <span class="alt-badge" style="background:{badge_color}; color:white;">
                             avg β {rel['avg_beta']:.0%}
                         </span>
-                        <span style="color:{diff_color}; font-weight:600; font-size:0.85rem; margin-left:6px;">
+                        <span style="color:{diff_color}; font-weight:600; margin-left:6px; font-size:0.85rem;">
                             {arrow} {abs(rel['pts_diff']):.0f} pts {direction_word}
                         </span>
-                        <span class="alt-wage">median wage {rel_wage_display}</span>
-                        <br>
                         <span class="title-info-wrapper">
                             <div class="alt-shared alt-shared-hoverable">{rel['shared_count']} shared occupations</div>
                             <span class="title-info-tooltip anchor-left">{shared_titles_html}</span>
@@ -958,36 +729,22 @@ else:
                 showlegend=False,
             ))
 
-            # AI-exposure tier legend, rendered as a plain HTML/CSS row
-            # above the chart rather than a Plotly legend -- Plotly
-            # positions its legend relative to the *plot area*, which
-            # sits well to the right of the (often long) occupation
-            # labels on the y-axis; getting it to visually sit flush
-            # above those labels meant fighting Plotly's paper/
-            # container coordinate systems. A plain HTML row placed
-            # here, above st.plotly_chart, is laid out by Streamlit
-            # itself and always spans the full column, directly above
-            # the whole chart -- labels included.
-            TIER_LEGEND = [
-                ("Very Low", "#2CA02C"),
-                ("Low", "#8BC34A"),
+            # Legend (dummy traces, one per exposure tier) -- this
+            # meaning never changes regardless of which metric is
+            # sorted/plotted, so it's always shown the same way.
+            for tier_name, tier_color in [
+                ("Low", "#2CA02C"),
                 ("Moderate", "#F2C744"),
                 ("High", "#E67E22"),
                 ("Very High", "#B22222"),
-            ]
-            legend_items_html = "".join(
-                f'<span class="tier-legend-item">'
-                f'<span class="tier-dot" style="background:{tier_color};"></span>{tier_name}'
-                f'</span>'
-                for tier_name, tier_color in TIER_LEGEND
-            )
-            st.markdown(
-                f'<div class="tier-legend">'
-                f'<span class="tier-legend-title">AI exposure:</span>'
-                f'{legend_items_html}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            ]:
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None],
+                    mode="markers",
+                    marker=dict(size=10, color=tier_color),
+                    name=tier_name,
+                    showlegend=True,
+                ))
 
             if n_bars < n_occ:
                 st.caption(
@@ -1019,7 +776,14 @@ else:
             fig.update_layout(
                 height=max(380, 24 * n_bars + 140),
                 margin=dict(l=10, r=20, t=10, b=10),
-                showlegend=False,
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom", y=1.02,
+                    xanchor="left", x=0,
+                    title="AI exposure",
+                    font=dict(size=12),
+                ),
                 xaxis=dict(
                     title=axis_titles[metric_kind],
                     tickformat=tick_formats[metric_kind],
@@ -1181,55 +945,6 @@ else:
                         "related_majors": related_majors_for_job,
                     }
                     st.rerun()
-
-    # -----------------------------------------------------
-    # Skills / Abilities / Work Activities detail
-    # -----------------------------------------------------
-    #
-    # Shown once an occupation is selected, underneath the bar chart.
-    # All three sections use the same HTML/CSS "meter list" (a label,
-    # a filled bar sized to Importance, and the value) so they stay
-    # easy to compare against each other -- only the accent color
-    # changes per section. Level (0-7) is shown as small muted text
-    # under each label rather than a second bar or axis, keeping the
-    # list skimmable at a glance.
-
-    current_selection = st.session_state.get("selected_occupation")
-
-    if current_selection:
-
-        detail_row = fan_df[fan_df["O*NET-SOC 2019 Title"] == current_selection]
-
-        if not detail_row.empty:
-
-            onet_code = detail_row.iloc[0].get("O*NET Code")
-
-            st.divider()
-            st.markdown(f"**Skills, Abilities & Work Activities — {current_selection}**")
-            st.caption(
-                "How important each is to this occupation, on a 1 (not important) to "
-                "5 (extremely important) scale."
-            )
-
-            skl_col, abl_col, act_col = st.columns(3)
-
-            sections = [
-                (skl_col, "Top Skills", skills_df, "#1A56DB"),
-                (abl_col, "Top Abilities", abilities_df, "#7C3AED"),
-                (act_col, "Top Work Activities", activities_df, "#0E9F6E"),
-            ]
-
-            for section_col, section_title, source_df, accent_color in sections:
-                with section_col:
-                    st.markdown(f"*{section_title}*")
-                    top_elements = _top_elements_for_occupation(source_df, onet_code)
-                    if top_elements.empty:
-                        st.caption("No data available for this occupation.")
-                    else:
-                        st.markdown(
-                            _meter_list_html(top_elements, accent_color),
-                            unsafe_allow_html=True,
-                        )
 
 
 # ---------------------------------------------------

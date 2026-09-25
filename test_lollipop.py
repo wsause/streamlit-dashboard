@@ -320,80 +320,6 @@ st.markdown(
         box-shadow: none;
         outline: none;
     }
-    /* HTML/CSS "meter list" used for the Skills/Abilities/Work
-       Activities section: one row per element, a label, a filled
-       horizontal bar sized to its Importance score, and the value. */
-    .meter-list {
-        margin-top: 4px;
-    }
-    .meter-row {
-        margin-bottom: 10px;
-    }
-    .meter-label {
-        font-size: 0.85rem;
-        font-weight: 600;
-        color: #1F2937;
-        margin-bottom: 3px;
-    }
-    .meter-track-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .meter-track {
-        flex: 1;
-        height: 8px;
-        border-radius: 4px;
-        background: #E5E7EB;
-        overflow: hidden;
-    }
-    .meter-fill {
-        height: 100%;
-        border-radius: 4px;
-    }
-    .meter-value {
-        font-size: 0.78rem;
-        font-weight: 700;
-        color: #374151;
-        width: 24px;
-        text-align: right;
-        flex-shrink: 0;
-    }
-    .meter-level {
-        font-size: 0.72rem;
-        color: #9CA3AF;
-        margin-top: 1px;
-    }
-    /* AI-exposure tier legend shown above the occupation bar chart --
-       a plain HTML row (rather than Plotly's own legend) so it
-       always spans the full chart column and sits flush above the
-       whole chart, y-axis labels included. */
-    .tier-legend {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 14px;
-        margin: 4px 0 6px 0;
-    }
-    .tier-legend-title {
-        font-size: 0.82rem;
-        font-weight: 700;
-        color: #374151;
-    }
-    .tier-legend-item {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        font-size: 0.82rem;
-        color: #374151;
-    }
-    .tier-dot {
-        display: inline-block;
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        flex-shrink: 0;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -401,19 +327,10 @@ st.markdown(
 
 
 def _exposure_tier(beta):
-    """Five equal-width (20-point) bands across the full 0-100% range
-    of AI exposure (beta), instead of the earlier four uneven bands
-    (35/60/80 cutoffs). The old "Moderate" band spanned 25 points
-    (35-60%) and visually swallowed most occupations into one color;
-    splitting into five even 20-point bands spreads occupations
-    across more colors instead of clustering into one.
-    """
     if pd.isna(beta):
         return "Unknown", "#B0B0B0"
-    if beta < 0.20:
-        return "Very Low", "#2CA02C"
-    if beta < 0.40:
-        return "Low", "#8BC34A"
+    if beta < 0.35:
+        return "Low", "#2CA02C"
     if beta < 0.60:
         return "Moderate", "#F2C744"
     if beta < 0.80:
@@ -441,11 +358,9 @@ def _top_elements_for_occupation(df, onet_code, top_n=10):
 
     These three files share the same shape: one row per
     (occupation, element, scale), where Scale ID "IM" = Importance
-    (1-5) and "LV" = Level -- O*NET's own definition of Level is
-    "the amount needed on the job" (0-7). Ranked by Importance,
-    since that's the more intuitive "how much does this matter for
-    this job" number -- Level is shown as secondary detail under
-    each row.
+    (1-5) and "LV" = Level (0-7). Ranked by Importance, since that's
+    the more intuitive "how much does this matter for this job"
+    number -- Level is still available for the hover tooltip.
     """
 
     if onet_code is None:
@@ -482,38 +397,61 @@ def _top_elements_for_occupation(df, onet_code, top_n=10):
     return pivoted
 
 
-def _meter_list_html(df, accent_color):
-    """A compact HTML/CSS "meter list": one row per element, each a
-    label above a horizontal filled bar sized to its Importance score
-    (0-5) with the numeric value at the end. Level (0-7) is shown as
-    small muted text under the label rather than a second visual
-    channel, so the list stays skimmable at a glance -- no legend,
-    no axis, no chart to interpret, just a ranked list of bars.
+def _lollipop_chart(df, accent_color, height=None):
+    """A lollipop/dot plot: one thin stem + a single dot per element,
+    positioned at its Importance score (1-5). Chosen over a scatter
+    plot because it keeps the same at-a-glance ranking a bar chart
+    gives (length/position = value) without needing a per-element
+    color legend, and it reads cleanly even when several elements
+    cluster at similar Importance values.
     """
 
     d = df.sort_values("Importance", ascending=False).reset_index(drop=True)
 
-    rows_html = []
+    fig = go.Figure()
+
+    stem_x, stem_y = [], []
     for _, row in d.iterrows():
-        pct = max(0.0, min(100.0, (row["Importance"] / 5) * 100))
-        level_html = ""
+        stem_x += [0, row["Importance"], None]
+        stem_y += [row["Element Name"], row["Element Name"], None]
+
+    fig.add_trace(go.Scatter(
+        x=stem_x,
+        y=stem_y,
+        mode="lines",
+        line=dict(color=accent_color, width=2),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+
+    hover_text = []
+    for _, row in d.iterrows():
+        text = f"<b>{row['Element Name']}</b><br>Importance: {row['Importance']:.1f}/5"
         if pd.notna(row.get("Level")):
-            level_html = f'<div class="meter-level">Amount needed on job: {row["Level"]:.1f}/7</div>'
+            text += f"<br>Typical level: {row['Level']:.1f}/7"
+        hover_text.append(text)
 
-        rows_html.append(
-            '<div class="meter-row">'
-            f'<div class="meter-label">{html.escape(str(row["Element Name"]))}</div>'
-            '<div class="meter-track-row">'
-            '<div class="meter-track">'
-            f'<div class="meter-fill" style="width:{pct:.0f}%; background:{accent_color};"></div>'
-            '</div>'
-            f'<div class="meter-value">{row["Importance"]:.1f}</div>'
-            '</div>'
-            f'{level_html}'
-            '</div>'
-        )
+    fig.add_trace(go.Scatter(
+        x=d["Importance"],
+        y=d["Element Name"],
+        mode="markers",
+        marker=dict(color=accent_color, size=11, line=dict(color="white", width=1)),
+        hovertext=hover_text,
+        hoverinfo="text",
+        showlegend=False,
+    ))
 
-    return '<div class="meter-list">' + "".join(rows_html) + '</div>'
+    fig.update_layout(
+        height=height or max(260, 30 * len(d) + 60),
+        margin=dict(l=10, r=15, t=10, b=30),
+        xaxis=dict(title="Importance", range=[0, 5.4], tickformat=".0f", dtick=1),
+        yaxis=dict(autorange="reversed"),
+        plot_bgcolor="#FAFAF8",
+        paper_bgcolor="#FAFAF8",
+        font=dict(family="Helvetica, Arial, sans-serif", size=11),
+    )
+
+    return fig
 
 
 @st.cache_data
@@ -958,36 +896,22 @@ else:
                 showlegend=False,
             ))
 
-            # AI-exposure tier legend, rendered as a plain HTML/CSS row
-            # above the chart rather than a Plotly legend -- Plotly
-            # positions its legend relative to the *plot area*, which
-            # sits well to the right of the (often long) occupation
-            # labels on the y-axis; getting it to visually sit flush
-            # above those labels meant fighting Plotly's paper/
-            # container coordinate systems. A plain HTML row placed
-            # here, above st.plotly_chart, is laid out by Streamlit
-            # itself and always spans the full column, directly above
-            # the whole chart -- labels included.
-            TIER_LEGEND = [
-                ("Very Low", "#2CA02C"),
-                ("Low", "#8BC34A"),
+            # Legend (dummy traces, one per exposure tier) -- this
+            # meaning never changes regardless of which metric is
+            # sorted/plotted, so it's always shown the same way.
+            for tier_name, tier_color in [
+                ("Low", "#2CA02C"),
                 ("Moderate", "#F2C744"),
                 ("High", "#E67E22"),
                 ("Very High", "#B22222"),
-            ]
-            legend_items_html = "".join(
-                f'<span class="tier-legend-item">'
-                f'<span class="tier-dot" style="background:{tier_color};"></span>{tier_name}'
-                f'</span>'
-                for tier_name, tier_color in TIER_LEGEND
-            )
-            st.markdown(
-                f'<div class="tier-legend">'
-                f'<span class="tier-legend-title">AI exposure:</span>'
-                f'{legend_items_html}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            ]:
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None],
+                    mode="markers",
+                    marker=dict(size=10, color=tier_color),
+                    name=tier_name,
+                    showlegend=True,
+                ))
 
             if n_bars < n_occ:
                 st.caption(
@@ -1019,7 +943,14 @@ else:
             fig.update_layout(
                 height=max(380, 24 * n_bars + 140),
                 margin=dict(l=10, r=20, t=10, b=10),
-                showlegend=False,
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom", y=1.02,
+                    xanchor="left", x=0,
+                    title="AI exposure",
+                    font=dict(size=12),
+                ),
                 xaxis=dict(
                     title=axis_titles[metric_kind],
                     tickformat=tick_formats[metric_kind],
@@ -1187,12 +1118,13 @@ else:
     # -----------------------------------------------------
     #
     # Shown once an occupation is selected, underneath the bar chart.
-    # All three sections use the same HTML/CSS "meter list" (a label,
-    # a filled bar sized to Importance, and the value) so they stay
-    # easy to compare against each other -- only the accent color
-    # changes per section. Level (0-7) is shown as small muted text
-    # under each label rather than a second bar or axis, keeping the
-    # list skimmable at a glance.
+    # All three sections use the same lollipop/dot-plot chart type
+    # (a stem + a single dot at each element's Importance score, on a
+    # shared 1-5 scale) so they stay easy to compare against each
+    # other -- only the accent color changes per section. Level
+    # (0-7) is included in the hover tooltip rather than encoded
+    # visually (e.g. via dot size), which kept the three charts
+    # simpler and easier to read side by side.
 
     current_selection = st.session_state.get("selected_occupation")
 
@@ -1208,7 +1140,7 @@ else:
             st.markdown(f"**Skills, Abilities & Work Activities — {current_selection}**")
             st.caption(
                 "How important each is to this occupation, on a 1 (not important) to "
-                "5 (extremely important) scale."
+                "5 (extremely important) scale. Hover a dot for its typical skill/ability level."
             )
 
             skl_col, abl_col, act_col = st.columns(3)
@@ -1226,9 +1158,11 @@ else:
                     if top_elements.empty:
                         st.caption("No data available for this occupation.")
                     else:
-                        st.markdown(
-                            _meter_list_html(top_elements, accent_color),
-                            unsafe_allow_html=True,
+                        st.plotly_chart(
+                            _lollipop_chart(top_elements, accent_color),
+                            use_container_width=True,
+                            config={"displayModeBar": False},
+                            key=f"lollipop_{section_title.replace(' ', '_')}_{current_selection}",
                         )
 
 
