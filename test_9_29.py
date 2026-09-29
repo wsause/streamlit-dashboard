@@ -292,103 +292,29 @@ st.markdown(
     }
     /* Tighten the native bordered container used for each
        alternative-major card (and the "your major" card) so the
-       link button / title sits snugly with the stats beneath it,
-       and center that content vertically within the box instead of
-       leaving it pinned toward one edge. */
+       link button / title sits snugly with the stats beneath it. */
     div[data-testid="stVerticalBlockBorderWrapper"] {
         padding: 2px 4px;
     }
-    div[data-testid="stVerticalBlockBorderWrapper"] > div {
-        height: 100%;
-    }
-    div[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlock"] {
-        justify-content: center;
-        gap: 8px;
-    }
-    /* Zero out every element's own top/bottom margin inside these
-       cards (Streamlit gives each one a default margin regardless of
-       position) and rely solely on the .stVerticalBlock's own `gap`
-       above for the space between them -- otherwise a middle
-       element's default margin can add an extra, uneven gap on top
-       of that `gap` value, as happened with the button's wrapper. */
-    div[data-testid="stVerticalBlockBorderWrapper"] .element-container {
-        margin-top: 0 !important;
-        margin-bottom: 0 !important;
-    }
-    /* A fully self-contained card for "YOUR MAJOR" -- its own border
-       and padding, set directly here rather than relying on
-       st.container(border=True)'s spacing (see the comment where
-       this is used in the code). */
-    .major-card {
-        border: 1px solid rgba(49, 51, 63, 0.2);
-        border-radius: 8px;
-        padding: 12px 14px;
-        margin-bottom: 4px;
-    }
-    .major-card-title {
-        font-weight: 700;
-        font-size: 1rem;
-        color: #0F1116;
-        margin-bottom: 8px;
-    }
-    /* Style the alternative-major buttons to match the font/weight/
-       size/spacing used for the "YOUR MAJOR" card's title (kept blue
-       here, since it's clickable and should still read as a link).
-       The actual text sits several layers deep inside Streamlit's
-       button markup (button > div > span > div.stMarkdownContainer
-       > p), each of which carries its own Streamlit-injected
-       padding/margin/font styling that a simple `button { ... }`
-       rule doesn't reach or reliably beat -- so instead of patching
-       each layer individually, `all: unset` resets every layer back
-       to plain inherited styling, and the properties we actually
-       want are re-applied explicitly afterward, on both the button
-       and its descendants. These are the only buttons in the app,
-       so a global rule is safe. */
-    /* Streamlit sets an inline width="fit-content" on the button's
-       own element-container, which sizes it (and the button inside)
-       to its unwrapped content rather than the card's width -- so a
-       long major name only wraps where it happens to hit that
-       content-based width (e.g. at a "/"), not reliably at the
-       card's edge. !important forces it to the full card width so
-       wrapping is consistent for any title length. */
-    div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stElementContainer"] {
-        width: 100% !important;
-    }
-    div[data-testid="stButton"] {
-        width: 100%;
-    }
+    /* Style the alternative-major buttons to look like text links
+       rather than boxed buttons -- these are the only buttons in
+       the app, so a global rule is safe. */
     div[data-testid="stButton"] > button {
-        all: unset;
-        display: block;
-        width: 100%;
-        box-sizing: border-box;
-        white-space: normal;
-        overflow-wrap: break-word;
-        word-break: break-word;
-        cursor: pointer;
+        background: none;
+        border: none;
+        padding: 0;
+        margin: 0 0 2px 0;
         color: #1A56DB;
-        font-family: inherit;
         font-weight: 700;
         font-size: 1rem;
-        line-height: 1.3;
-        margin: 0;
-    }
-    div[data-testid="stButton"] > button * {
-        all: unset;
-        display: inline;
-        white-space: normal;
-        overflow-wrap: break-word;
-        word-break: break-word;
-        cursor: pointer;
-        color: inherit;
-        font: inherit;
+        text-align: left;
+        box-shadow: none;
     }
     div[data-testid="stButton"] > button:hover {
         text-decoration: underline;
         color: #123E9E;
-    }
-    div[data-testid="stButton"] > button:hover * {
-        color: #123E9E;
+        background: none;
+        border: none;
     }
     div[data-testid="stButton"] > button:focus {
         box-shadow: none;
@@ -815,28 +741,24 @@ else:
             else "N/A"
         )
 
-        # Rendered as one self-contained HTML block (its own border +
-        # padding, via the .major-card class) rather than
-        # st.container(border=True) -- Streamlit's own bordered
-        # container adds spacing around each element inside it that
-        # isn't fully controllable from outside, which was leaving
-        # extra empty space above the title with none below. A single
-        # HTML block sidesteps that entirely since we set the padding
-        # ourselves.
-        st.markdown(
-            f"""
-            <div class="major-card">
-                <div class="major-card-title">{selected_cip}</div>
-                <div>
-                    <span class="alt-badge" style="background:{your_badge_color}; color:white;">
-                        avg β {selected_avg_beta:.0%}
-                    </span>
-                    <span class="alt-wage">median wage {your_wage_display}</span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Styled the same way as the RELATED MAJORS cards below (a
+        # bordered container with a bold title and an exposure badge
+        # + median wage line) instead of a plain st.info box, so the
+        # two sections read as one consistent card style.
+        with st.container(border=True):
+            st.markdown(
+                f'<span style="font-weight:700; font-size:1rem;">{selected_cip}</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""
+                <span class="alt-badge" style="background:{your_badge_color}; color:white;">
+                    avg β {selected_avg_beta:.0%}
+                </span>
+                <span class="alt-wage">median wage {your_wage_display}</span>
+                """,
+                unsafe_allow_html=True,
+            )
 
         st.markdown("**RELATED MAJORS**")
 
@@ -1115,7 +1037,6 @@ else:
                 key="occupation_bar_chart",
                 on_select="rerun",
                 selection_mode="points",
-                config={"displayModeBar": False},
             )
 
             if bar_event.selection.points:
@@ -1284,39 +1205,31 @@ else:
             onet_code = detail_row.iloc[0].get("O*NET Code")
 
             st.divider()
+            st.markdown(f"**Skills, Abilities & Work Activities — {current_selection}**")
+            st.caption(
+                "How important each is to this occupation, on a 1 (not important) to "
+                "5 (extremely important) scale."
+            )
 
-            # Collapsed by default -- this detail is a level deeper
-            # than the bar chart/profile panel above, so it stays out
-            # of the way until a student actually wants to dig into
-            # what a job demands day to day.
-            with st.expander(
-                f"Skills, Abilities & Work Activities — {current_selection}",
-                expanded=True,
-            ):
-                st.caption(
-                    "How important each is to this occupation, on a 1 (not important) to "
-                    "5 (extremely important) scale."
-                )
+            skl_col, abl_col, act_col = st.columns(3)
 
-                skl_col, abl_col, act_col = st.columns(3)
+            sections = [
+                (skl_col, "Top Skills", skills_df, "#1A56DB"),
+                (abl_col, "Top Abilities", abilities_df, "#7C3AED"),
+                (act_col, "Top Work Activities", activities_df, "#0E9F6E"),
+            ]
 
-                sections = [
-                    (skl_col, "Top Skills", skills_df, "#1A56DB"),
-                    (abl_col, "Top Abilities", abilities_df, "#7C3AED"),
-                    (act_col, "Top Work Activities", activities_df, "#0E9F6E"),
-                ]
-
-                for section_col, section_title, source_df, accent_color in sections:
-                    with section_col:
-                        st.markdown(f"*{section_title}*")
-                        top_elements = _top_elements_for_occupation(source_df, onet_code)
-                        if top_elements.empty:
-                            st.caption("No data available for this occupation.")
-                        else:
-                            st.markdown(
-                                _meter_list_html(top_elements, accent_color),
-                                unsafe_allow_html=True,
-                            )
+            for section_col, section_title, source_df, accent_color in sections:
+                with section_col:
+                    st.markdown(f"*{section_title}*")
+                    top_elements = _top_elements_for_occupation(source_df, onet_code)
+                    if top_elements.empty:
+                        st.caption("No data available for this occupation.")
+                    else:
+                        st.markdown(
+                            _meter_list_html(top_elements, accent_color),
+                            unsafe_allow_html=True,
+                        )
 
 
 # ---------------------------------------------------
